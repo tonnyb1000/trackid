@@ -268,16 +268,22 @@
         <h2 id="privacy-heading">Privacy &amp; How This Works</h2>
         <ul class="info-list">
           <li>
-            <strong>Explicit consent:</strong> Only your own device is tracked, and only while tracking is active.
+            <strong>Explicit consent:</strong> Single-device tracking starts only after you press <em>Start tracking</em>. Cross-device sharing starts only after the recipient opens your link, clicks <em>Accept and share</em>, and grants browser permission.
           </li>
           <li>
-            <strong>Session memory only:</strong> Coordinates and your session path stay in this tab’s memory. Nothing is saved to disk or sent to a backend server.
+            <strong>Single-device session memory:</strong> When using <em>Start tracking</em> for your own device, coordinates and your session path stay in this tab’s memory only.
+          </li>
+          <li>
+            <strong>Cross-device share storage (Firebase):</strong> When you generate or accept a time-limited share link, the shared location and status are stored in Firebase Cloud Firestore so only your authenticated session and the bound recipient can access them. Clicking <em>Revoke &amp; delete</em> removes that Firestore document.
+          </li>
+          <li>
+            <strong>Optional IP lookup:</strong> Querying <code>ipwho.is</code> only runs if you check the agreement box and click the IP lookup button.
           </li>
           <li>
             <strong>Map tiles &amp; network:</strong> Loading map tiles (Esri World Street Map / OpenStreetMap) requires internet access and reveals your IP address to the tile provider.
           </li>
           <li>
-            <strong>Stopping &amp; clearing:</strong> <em>Stop tracking</em> stops all new updates while keeping your last marker visible. <em>Clear path</em> removes the drawn session trail.
+            <strong>Stopping &amp; clearing:</strong> <em>Stop tracking</em> / <em>Stop sharing</em> stops all new updates while keeping the last marker visible. <em>Clear path</em> removes the drawn session trail.
           </li>
           <li>
             <strong>Accuracy &amp; background limits:</strong> Browsers estimate location using GPS, Wi-Fi, or cell towers; updates may pause if your phone locks or the browser goes to the background.

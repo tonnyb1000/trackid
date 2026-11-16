@@ -12,6 +12,7 @@
     unsubscribeOwner: null,
     unsubscribeSharer: null,
     staleTimerId: null,
+    sharerExpiryTimerId: null,
     lastRemoteUpdatedMs: null,
     lastRemoteStatus: null,
     expiresAtMs: null,
@@ -157,17 +158,23 @@
   async function createShareLink() {
     clearGeoAlert();
     const label = (dom.requesterNameInput.value || "").trim() || "GIS Assignment User";
-    const minutes = Number(dom.shareDurationSelect.value) || 30;
+    const minutes = Math.min(60, Math.max(15, Number(dom.shareDurationSelect.value) || 30));
 
     try {
       dom.createShareBtn.disabled = true;
       const uid = await ensureFirebaseAuth();
 
-      // Clean up any previous listener
-      if (shareState.unsubscribeOwner) {
-        shareState.unsubscribeOwner();
-        shareState.unsubscribeOwner = null;
+      // Do not abandon an existing active share in Firestore: delete it first.
+      if (shareState.activeShareId) {
+        const deleted = await revokeAndDeleteShare();
+        if (!deleted) {
+          showGeoAlert(
+            "Could not delete your previous share link. Retry deleting it before creating a new one."
+          );
+          return;
+        }
       }
+
       if (bridge()) {
         bridge().clearRemoteMarker();
       }
@@ -272,7 +279,22 @@
           refreshRemoteStaleStatus();
         },
         (err) => {
-          showGeoAlert("Unable to listen for shared updates: " + err.message);
+          if (shareState.unsubscribeOwner) {
+            shareState.unsubscribeOwner();
+            shareState.unsubscribeOwner = null;
+          }
+          if (shareState.staleTimerId) {
+            window.clearInterval(shareState.staleTimerId);
+            shareState.staleTimerId = null;
+          }
+          if (err && err.code === "permission-denied") {
+            dom.remoteStatusValue.textContent = "Expired — access denied after expiry";
+            showGeoAlert(
+              "Share link expired and location access is now blocked by security rules. You can delete the expired session."
+            );
+          } else {
+            showGeoAlert("Unable to listen for shared updates: " + err.message);
+          }
         }
       );
   }
@@ -294,12 +316,24 @@
 
   async function revokeAndDeleteShare() {
     if (!shareState.activeShareId || !shareState.db) {
-      return;
+      return true;
     }
 
     const idToDelete = shareState.activeShareId;
-    shareState.activeShareId = null;
+    dom.revokeShareBtn.disabled = true;
+    dom.revokeShareBtn.textContent = "Deleting…";
 
+    try {
+      await shareState.db.collection("shares").doc(idToDelete).delete();
+    } catch (err) {
+      // Keep the session visible and activeShareId intact so the user can retry
+      dom.revokeShareBtn.disabled = false;
+      dom.revokeShareBtn.textContent = "Retry delete";
+      showGeoAlert("Could not delete remote share document: " + err.message + " (You can retry.)");
+      return false;
+    }
+
+    shareState.activeShareId = null;
     if (shareState.unsubscribeOwner) {
       shareState.unsubscribeOwner();
       shareState.unsubscribeOwner = null;
@@ -312,14 +346,11 @@
       bridge().clearRemoteMarker();
     }
 
-    try {
-      await shareState.db.collection("shares").doc(idToDelete).delete();
-    } catch (err) {
-      showGeoAlert("Could not delete remote share document: " + err.message);
-    }
-
+    dom.revokeShareBtn.disabled = false;
+    dom.revokeShareBtn.textContent = "Revoke & delete";
     dom.shareSessionPanel.hidden = true;
     dom.shareLinkOutput.value = "";
+    return true;
   }
 
   // ---------------------------------------------------------------------------
@@ -329,6 +360,10 @@
     if (shareState.sharerWatchId !== null) {
       navigator.geolocation.clearWatch(shareState.sharerWatchId);
       shareState.sharerWatchId = null;
+    }
+    if (shareState.sharerExpiryTimerId !== null) {
+      window.clearTimeout(shareState.sharerExpiryTimerId);
+      shareState.sharerExpiryTimerId = null;
     }
   }
 
@@ -385,23 +420,52 @@
       dom.acceptShareBtn.disabled = false;
       dom.declineShareBtn.disabled = false;
 
-      // Listen in case the requester revokes or the link expires
-      shareState.unsubscribeSharer = docRef.onSnapshot((updatedSnap) => {
-        if (!updatedSnap.exists) {
+      // Enforce automatic UI & GPS stop the moment expiresAt is reached
+      if (expiresMs && expiresMs > Date.now()) {
+        shareState.sharerExpiryTimerId = window.setTimeout(() => {
           stopLocalSharerWatch();
+          dom.acceptShareBtn.disabled = true;
+          dom.declineShareBtn.disabled = true;
           dom.consentDecisionActions.hidden = true;
           dom.consentActiveActions.hidden = true;
-          dom.sharerStatusText.textContent = "Link was revoked/deleted by requester";
-          return;
-        }
-        const updated = updatedSnap.data();
-        if (updated.status === "revoked") {
+          dom.sharerStatusText.textContent = "Link expired — sharing stopped automatically";
+        }, expiresMs - Date.now());
+      }
+
+      // Listen in case the requester revokes, deletes, or the session expires
+      shareState.unsubscribeSharer = docRef.onSnapshot(
+        (updatedSnap) => {
+          if (!updatedSnap.exists) {
+            stopLocalSharerWatch();
+            dom.consentDecisionActions.hidden = true;
+            dom.consentActiveActions.hidden = true;
+            dom.sharerStatusText.textContent = "Link was revoked/deleted by requester";
+            return;
+          }
+          const updated = updatedSnap.data();
+          if (updated.status === "revoked") {
+            stopLocalSharerWatch();
+            dom.consentDecisionActions.hidden = true;
+            dom.consentActiveActions.hidden = true;
+            dom.sharerStatusText.textContent = "Revoked by requester";
+          }
+        },
+        (err) => {
           stopLocalSharerWatch();
+          if (shareState.unsubscribeSharer) {
+            shareState.unsubscribeSharer();
+            shareState.unsubscribeSharer = null;
+          }
+          dom.acceptShareBtn.disabled = true;
+          dom.declineShareBtn.disabled = true;
           dom.consentDecisionActions.hidden = true;
           dom.consentActiveActions.hidden = true;
-          dom.sharerStatusText.textContent = "Revoked by requester";
+          dom.sharerStatusText.textContent =
+            err && err.code === "permission-denied"
+              ? "Link expired or access ended — sharing stopped"
+              : "Connection/access error — sharing stopped (" + err.message + ")";
         }
-      });
+      );
 
       dom.declineShareBtn.addEventListener("click", async () => {
         dom.acceptShareBtn.disabled = true;
@@ -439,6 +503,9 @@
 
         shareState.sharerWatchId = navigator.geolocation.watchPosition(
           async (pos) => {
+            if (shareState.sharerWatchId === null) {
+              return;
+            }
             if (expiresMs && Date.now() >= expiresMs) {
               stopLocalSharerWatch();
               dom.consentActiveActions.hidden = true;
@@ -447,7 +514,6 @@
             }
 
             const payload = {
-              sharerUid: shareState.uid,
               status: "active",
               location: {
                 lat: pos.coords.latitude,
@@ -456,6 +522,10 @@
                 updatedAtMs: Date.now()
               }
             };
+            // Bind sharerUid only on the initial pending -> active transition
+            if (!shareState.sharerAccepted) {
+              payload.sharerUid = shareState.uid;
+            }
 
             try {
               await docRef.update(payload);

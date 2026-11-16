@@ -5,60 +5,105 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isValidLocation(loc) {
+      return loc is map
+        && loc.keys().hasOnly(["lat", "lng", "accuracy", "updatedAtMs"])
+        && loc.lat is number && loc.lat >= -90 && loc.lat <= 90
+        && loc.lng is number && loc.lng >= -180 && loc.lng <= 180
+        && (loc.accuracy == null || (loc.accuracy is number && loc.accuracy >= 0))
+        && loc.updatedAtMs is number;
+    }
+
     match /shares/{shareId} {
-      // Prevent enumerating other users' share links
-      allow list: if isSignedIn() && resource.data.ownerUid == request.auth.uid;
+      // Never allow listing/enumerating the shares collection
+      allow list: if false;
 
       // Only the owner, the bound sharer, or an authenticated recipient holding
-      // the unguessable shareId for an unclaimed pending invite may read it.
+      // the unguessable shareId for an unclaimed pending invite may read it,
+      // and ONLY before the session expires.
       allow get: if isSignedIn() && (
         resource == null ||
-        resource.data.ownerUid == request.auth.uid ||
-        resource.data.sharerUid == request.auth.uid ||
-        (resource.data.sharerUid == null && resource.data.status == "pending")
+        (
+          request.time < resource.data.expiresAt
+          && (
+            resource.data.ownerUid == request.auth.uid ||
+            resource.data.sharerUid == request.auth.uid ||
+            (resource.data.sharerUid == null && resource.data.status == "pending")
+          )
+        )
       );
 
       // Only the signed-in requester can create a new pending, future-expiring share
+      // with an unguessable (>= 32 char) shareId and strict field whitelist.
       allow create: if isSignedIn()
+        && shareId.size() >= 32
+        && request.resource.data.keys().hasOnly([
+          "ownerUid",
+          "sharerUid",
+          "requesterLabel",
+          "status",
+          "createdAt",
+          "expiresAt",
+          "location"
+        ])
         && request.resource.data.ownerUid == request.auth.uid
         && request.resource.data.sharerUid == null
         && request.resource.data.status == "pending"
+        && request.resource.data.location == null
+        && request.resource.data.createdAt == request.time
         && request.resource.data.expiresAt is timestamp
         && request.resource.data.expiresAt > request.time
+        && request.resource.data.expiresAt <= request.time + duration.value(2, 'h')
         && request.resource.data.requesterLabel is string
         && request.resource.data.requesterLabel.size() > 0
         && request.resource.data.requesterLabel.size() <= 80;
 
       allow update: if isSignedIn() && (
-        // 1. Owner can revoke an existing share
+        // 1. Owner can only change status to "revoked"
         (
           resource.data.ownerUid == request.auth.uid
-          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status"])
           && request.resource.data.status == "revoked"
         )
         ||
-        // 2. Recipient accepts or declines an unclaimed, unexpired pending invite
+        // 2a. Recipient declines an unclaimed, unexpired pending invite (no location allowed)
         (
           resource.data.status == "pending"
           && resource.data.sharerUid == null
           && request.time < resource.data.expiresAt
-          && request.resource.data.ownerUid == resource.data.ownerUid
-          && request.resource.data.expiresAt == resource.data.expiresAt
-          && request.resource.data.requesterLabel == resource.data.requesterLabel
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["sharerUid", "status"])
           && request.resource.data.sharerUid == request.auth.uid
-          && request.resource.data.status in ["active", "declined"]
+          && request.resource.data.status == "declined"
         )
         ||
-        // 3. Bound sharer updates live coordinates or stops sharing before expiry
+        // 2b. Recipient accepts an unclaimed, unexpired pending invite with valid initial location
+        (
+          resource.data.status == "pending"
+          && resource.data.sharerUid == null
+          && request.time < resource.data.expiresAt
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["sharerUid", "status", "location"])
+          && request.resource.data.sharerUid == request.auth.uid
+          && request.resource.data.status == "active"
+          && isValidLocation(request.resource.data.location)
+        )
+        ||
+        // 3a. Bound sharer updates live coordinates while active and unexpired
         (
           resource.data.sharerUid == request.auth.uid
           && resource.data.status == "active"
           && request.time < resource.data.expiresAt
-          && request.resource.data.ownerUid == resource.data.ownerUid
-          && request.resource.data.sharerUid == resource.data.sharerUid
-          && request.resource.data.expiresAt == resource.data.expiresAt
-          && request.resource.data.requesterLabel == resource.data.requesterLabel
-          && request.resource.data.status in ["active", "stopped"]
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "location"])
+          && request.resource.data.status == "active"
+          && isValidLocation(request.resource.data.location)
+        )
+        ||
+        // 3b. Bound sharer stops sharing while active and unexpired
+        (
+          resource.data.sharerUid == request.auth.uid
+          && resource.data.status == "active"
+          && request.time < resource.data.expiresAt
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status"])
+          && request.resource.data.status == "stopped"
         )
       );
 
