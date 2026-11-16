@@ -1,0 +1,69 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    match /shares/{shareId} {
+      // Prevent enumerating other users' share links
+      allow list: if isSignedIn() && resource.data.ownerUid == request.auth.uid;
+
+      // Only the owner, the bound sharer, or an authenticated recipient holding
+      // the unguessable shareId for an unclaimed pending invite may read it.
+      allow get: if isSignedIn() && (
+        resource == null ||
+        resource.data.ownerUid == request.auth.uid ||
+        resource.data.sharerUid == request.auth.uid ||
+        (resource.data.sharerUid == null && resource.data.status == "pending")
+      );
+
+      // Only the signed-in requester can create a new pending, future-expiring share
+      allow create: if isSignedIn()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.sharerUid == null
+        && request.resource.data.status == "pending"
+        && request.resource.data.expiresAt is timestamp
+        && request.resource.data.expiresAt > request.time
+        && request.resource.data.requesterLabel is string
+        && request.resource.data.requesterLabel.size() > 0
+        && request.resource.data.requesterLabel.size() <= 80;
+
+      allow update: if isSignedIn() && (
+        // 1. Owner can revoke an existing share
+        (
+          resource.data.ownerUid == request.auth.uid
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.status == "revoked"
+        )
+        ||
+        // 2. Recipient accepts or declines an unclaimed, unexpired pending invite
+        (
+          resource.data.status == "pending"
+          && resource.data.sharerUid == null
+          && request.time < resource.data.expiresAt
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.expiresAt == resource.data.expiresAt
+          && request.resource.data.requesterLabel == resource.data.requesterLabel
+          && request.resource.data.sharerUid == request.auth.uid
+          && request.resource.data.status in ["active", "declined"]
+        )
+        ||
+        // 3. Bound sharer updates live coordinates or stops sharing before expiry
+        (
+          resource.data.sharerUid == request.auth.uid
+          && resource.data.status == "active"
+          && request.time < resource.data.expiresAt
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.sharerUid == resource.data.sharerUid
+          && request.resource.data.expiresAt == resource.data.expiresAt
+          && request.resource.data.requesterLabel == resource.data.requesterLabel
+          && request.resource.data.status in ["active", "stopped"]
+        )
+      );
+
+      // Only the owner can delete the share document and wipe stored data
+      allow delete: if isSignedIn() && resource.data.ownerUid == request.auth.uid;
+    }
+  }
+}

@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>Live Location Tracker — University GIS Web App</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js" defer></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js" defer></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js" defer></script>
+  <script src="firebase-config.js" defer></script>
+  <script src="app.js" defer></script>
+  <script src="share.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to map and controls</a>
+
+  <header class="app-header">
+    <div class="header-inner">
+      <div>
+        <h1>Live Location Tracker</h1>
+        <p class="subtitle">
+          Consent-based browser geolocation displayed on an interactive map (session memory only).
+        </p>
+      </div>
+      <div class="status-pill" id="header-status-pill" data-state="idle">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="header-status-text">Idle</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Banner shown only when Simulated Demo Mode is active -->
+  <div id="sim-banner" class="banner banner-sim" role="status" hidden>
+    <strong>SIMULATED MODE ACTIVE:</strong>
+    Showing synthetic test coordinates — this is <strong>not</strong> your real GPS location.
+  </div>
+
+  <!-- Banner for errors, insecure HTTP context warnings, or offline/tile alerts -->
+  <div id="alert-banner" class="banner banner-alert" role="alert" hidden>
+    <span id="alert-message"></span>
+  </div>
+
+  <!-- Sharer Consent View (shown only when opened via ?share=<id> link) -->
+  <section id="sharer-consent-view" class="consent-shell" aria-labelledby="consent-heading" hidden>
+    <div class="card consent-card">
+      <h2 id="consent-heading">Location Share Request</h2>
+      <p id="consent-summary" class="helper-text">Loading share request details…</p>
+
+      <ul class="info-list consent-details" id="consent-details-list">
+        <li><strong>Requested by:</strong> <span id="consent-requester">—</span></li>
+        <li><strong>Expires at:</strong> <span id="consent-expires">—</span></li>
+        <li><strong>What is shared:</strong> Your browser’s latitude, longitude, estimated accuracy, and update time only while sharing is active.</li>
+        <li><strong>Your control:</strong> Nothing is shared until you press <strong>Accept and share</strong> and grant browser location permission. You can stop at any time.</li>
+      </ul>
+
+      <div id="consent-status-box" class="readout-item" aria-live="polite">
+        <span class="dt-like">Sharing status</span>
+        <strong id="sharer-status-text">Waiting for your decision</strong>
+      </div>
+
+      <div class="consent-actions" id="consent-decision-actions">
+        <button type="button" id="accept-share-btn" class="btn btn-primary" disabled>
+          Accept and share
+        </button>
+        <button type="button" id="decline-share-btn" class="btn btn-secondary" disabled>
+          Decline
+        </button>
+      </div>
+
+      <div class="consent-actions" id="consent-active-actions" hidden>
+        <button type="button" id="stop-sharing-btn" class="btn btn-danger">
+          Stop sharing
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <main id="main-content" class="layout">
+    <!-- Map Section -->
+    <section class="map-section" aria-label="Interactive location map">
+      <div
+        id="map"
+        class="map-container"
+        role="region"
+        aria-label="Interactive OpenStreetMap view"
+      >
+        <div class="map-placeholder" id="map-fallback">
+          <p><strong>Loading interactive map…</strong></p>
+          <p>If the map does not appear, check your internet connection so Leaflet and OpenStreetMap tiles can load.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Controls, Live Readout & Privacy Notices -->
+    <aside class="sidebar" aria-label="Tracking controls and location details">
+      <!-- Real GPS Tracking Controls -->
+      <section class="card" aria-labelledby="controls-heading">
+        <h2 id="controls-heading">Location Tracking</h2>
+        <p class="helper-text">
+          Tracking starts only after you press <strong>Start tracking</strong> and grant browser permission.
+        </p>
+
+        <div class="button-grid">
+          <button type="button" id="start-btn" class="btn btn-primary">
+            Start tracking
+          </button>
+          <button type="button" id="stop-btn" class="btn btn-danger" disabled>
+            Stop tracking
+          </button>
+          <button type="button" id="center-btn" class="btn btn-secondary" disabled>
+            Centre on location
+          </button>
+          <button type="button" id="clear-path-btn" class="btn btn-secondary" disabled>
+            Clear path
+          </button>
+        </div>
+      </section>
+
+      <!-- Live Telemetry Readout -->
+      <section class="card" aria-labelledby="readout-heading">
+        <h2 id="readout-heading">Current Session Readout</h2>
+        <dl class="readout-list">
+          <div class="readout-item">
+            <dt>Tracking status</dt>
+            <dd id="status-value" aria-live="polite">Idle — waiting for you to start</dd>
+          </div>
+          <div class="readout-item">
+            <dt>Latitude</dt>
+            <dd id="lat-value" class="mono">—</dd>
+          </div>
+          <div class="readout-item">
+            <dt>Longitude</dt>
+            <dd id="lng-value" class="mono">—</dd>
+          </div>
+          <div class="readout-item">
+            <dt>
+              Estimated accuracy
+              <span class="label-note">(estimate, not a guarantee)</span>
+            </dt>
+            <dd id="accuracy-value" class="mono">—</dd>
+          </div>
+          <div class="readout-item">
+            <dt>Last update</dt>
+            <dd id="time-value" class="mono">—</dd>
+          </div>
+          <div class="readout-item">
+            <dt>Session path points</dt>
+            <dd id="points-value" class="mono">0 / 500 (memory only)</dd>
+          </div>
+        </dl>
+      </section>
+
+      <!-- Clearly Separated Simulated Testing Mode -->
+      <section class="card card-sim" aria-labelledby="sim-heading">
+        <div class="sim-header">
+          <h2 id="sim-heading">Simulated Testing Mode</h2>
+          <span class="badge-sim">Simulated</span>
+        </div>
+        <p class="helper-text">
+          Optional demo for testing indoors or on a desktop without GPS. Completely separate from real device tracking.
+        </p>
+        <button type="button" id="sim-toggle-btn" class="btn btn-sim">
+          Start simulated demo
+        </button>
+      </section>
+
+      <!-- Remote Device Share Link (Consent-Based via Firebase) -->
+      <section class="card" aria-labelledby="share-heading">
+        <h2 id="share-heading">Share Link With Another Device</h2>
+        <p class="helper-text">
+          Create a time-limited consent link. Only you (this authenticated session) can view updates, and the other person must accept and grant browser permission.
+        </p>
+
+        <div class="form-stack">
+          <label class="field-label" for="requester-name-input">Your name / label shown to recipient</label>
+          <input
+            type="text"
+            id="requester-name-input"
+            class="text-input"
+            maxlength="80"
+            placeholder="e.g. Alex (GIS Lab)"
+          >
+
+          <label class="field-label" for="share-duration-select">Link expires after</label>
+          <select id="share-duration-select" class="text-input">
+            <option value="15">15 minutes</option>
+            <option value="30" selected>30 minutes</option>
+            <option value="60">60 minutes</option>
+          </select>
+
+          <button type="button" id="create-share-btn" class="btn btn-primary">
+            Generate share link
+          </button>
+        </div>
+
+        <div id="share-session-panel" class="share-session-panel" hidden>
+          <label class="field-label" for="share-link-output">Time-limited invite link</label>
+          <div class="copy-row">
+            <input type="text" id="share-link-output" class="text-input mono" readonly>
+            <button type="button" id="copy-share-btn" class="btn btn-secondary">Copy</button>
+          </div>
+
+          <dl class="readout-list">
+            <div class="readout-item">
+              <dt>Shared device status</dt>
+              <dd id="remote-status-value" aria-live="polite">Waiting for recipient</dd>
+            </div>
+            <div class="readout-item">
+              <dt>Shared coordinates</dt>
+              <dd id="remote-coords-value" class="mono">—</dd>
+            </div>
+            <div class="readout-item">
+              <dt>Shared estimated accuracy</dt>
+              <dd id="remote-accuracy-value" class="mono">—</dd>
+            </div>
+            <div class="readout-item">
+              <dt>Last remote update</dt>
+              <dd id="remote-time-value" class="mono">—</dd>
+            </div>
+            <div class="readout-item">
+              <dt>Link expires at</dt>
+              <dd id="remote-expires-value" class="mono">—</dd>
+            </div>
+          </dl>
+
+          <div class="button-grid">
+            <button type="button" id="center-remote-btn" class="btn btn-secondary" disabled>
+              Centre on shared
+            </button>
+            <button type="button" id="revoke-share-btn" class="btn btn-danger">
+              Revoke &amp; delete
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Clearly Separated Approximate IP Network Location (Optional) -->
+      <section class="card card-ip" aria-labelledby="ip-heading">
+        <h2 id="ip-heading">Approximate IP Network Location</h2>
+        <p class="helper-text">
+          <strong>Not precise device tracking.</strong> An IP address alone cannot send a consent request or provide live GPS—it only estimates your ISP’s network city/region.
+        </p>
+        <label class="checkbox-row" for="ip-consent-checkbox">
+          <input type="checkbox" id="ip-consent-checkbox">
+          <span>I agree to query <code>ipwho.is</code> for this browser’s approximate network location.</span>
+        </label>
+        <button type="button" id="ip-lookup-btn" class="btn btn-secondary btn-full" disabled>
+          Check approximate IP location
+        </button>
+        <dl class="readout-list" id="ip-readout" hidden>
+          <div class="readout-item">
+            <dt>Approximate network location (ISP estimate)</dt>
+            <dd id="ip-location-value">—</dd>
+          </div>
+          <div class="readout-item">
+            <dt>Network / ISP</dt>
+            <dd id="ip-isp-value">—</dd>
+          </div>
+        </dl>
+      </section>
+
+      <!-- Privacy & Technical Transparency -->
+      <section class="card card-info" aria-labelledby="privacy-heading">
+        <h2 id="privacy-heading">Privacy &amp; How This Works</h2>
+        <ul class="info-list">
+          <li>
+            <strong>Explicit consent:</strong> Only your own device is tracked, and only while tracking is active.
+          </li>
+          <li>
+            <strong>Session memory only:</strong> Coordinates and your session path stay in this tab’s memory. Nothing is saved to disk or sent to a backend server.
+          </li>
+          <li>
+            <strong>Map tiles &amp; network:</strong> Loading map tiles (Esri World Street Map / OpenStreetMap) requires internet access and reveals your IP address to the tile provider.
+          </li>
+          <li>
+            <strong>Stopping &amp; clearing:</strong> <em>Stop tracking</em> stops all new updates while keeping your last marker visible. <em>Clear path</em> removes the drawn session trail.
+          </li>
+          <li>
+            <strong>Accuracy &amp; background limits:</strong> Browsers estimate location using GPS, Wi-Fi, or cell towers; updates may pause if your phone locks or the browser goes to the background.
+          </li>
+        </ul>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="app-footer">
+    <p>
+      University GIS Assignment &bull; Plain HTML, CSS &amp; JavaScript &bull; Map data &copy; OpenStreetMap contributors
+    </p>
+  </footer>
+</body>
+</html>
